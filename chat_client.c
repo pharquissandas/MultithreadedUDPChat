@@ -10,7 +10,7 @@
 // Spawns two threads:
 // 1) Sender thread: reads user input and sends it to the server
 // 2) Listener thread: receives messages from the server and prints them
-// Supports commands like conn, say, sayto, mute, etc.
+// Supports commands like conn$, say$, sayto$, mute$, etc.
 // Keeps running until the user disconnects with disconn
 
 #define SERVER_PORT 12000
