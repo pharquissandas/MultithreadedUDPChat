@@ -1,56 +1,120 @@
-
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <unistd.h>
 #include "udp.h"
 
-#define CLIENT_PORT 10000
 
-// client code
-int main(int argc, char *argv[])
-{
-    // This function opens a UDP socket,
-    // binding it to all IP interfaces of this machine,
-    // and port number CLIENT_PORT.
-    // (See details of the function in udp.h)
-    int sd = udp_socket_open(CLIENT_PORT);
+// Essentially this code opens a UDP socket on a dynamic port
+// Spawns two threads:
+// 1) Sender thread: reads user input and sends it to the server
+// 2) Listener thread: receives messages from the server and prints them
+// Supports commands like conn, say, sayto, mute, etc.
+// Keeps running until the user disconnects with disconn
 
-    // Variable to store the server's IP address and port
-    // (i.e. the server we are trying to contact).
-    // Generally, it is possible for the responder to be
-    // different from the server requested.
-    // Although, in our case the responder will
-    // always be the same as the server.
-    struct sockaddr_in server_addr, responder_addr;
+#define SERVER_PORT 12000
+#define BUFFER_SIZE 1024
 
-    // Initializing the server's address.
-    // We are currently running the server on localhost (127.0.0.1).
-    // You can change this to a different IP address
-    // when running the server on a different machine.
-    // (See details of the function in udp.h)
-    int rc = set_socket_addr(&server_addr, "127.0.0.1", SERVER_PORT);
+// structure to pass multiple arguments to threads
+typedef struct{
+    int sd;
+    struct sockaddr_in server_addr;
+} thread_args_t;
+    
+// listener thread function --> loops to receive messages from the server, prints them immediately without blocking reader
+void* listener_thread(void* arg){
+    thread_args_t* args = (thread_args_t*) arg;
+    char buffer[BUFFER_SIZE];
+    struct sockaddr_in responder_addr;
 
-    // Storage for request and response messages
-    char client_request[BUFFER_SIZE], server_response[BUFFER_SIZE];
-
-    // Demo code (remove later)
-    strcpy(client_request, "Dummy Request");
-
-    // This function writes to the server (sends request)
-    // through the socket at sd.
-    // (See details of the function in udp.h)
-    rc = udp_socket_write(sd, &server_addr, client_request, BUFFER_SIZE);
-
-    if (rc > 0)
-    {
-        // This function reads the response from the server
-        // through the socket at sd.
-        // In our case, responder_addr will simply be
-        // the same as server_addr.
-        // (See details of the function in udp.h)
-        int rc = udp_socket_read(sd, &responder_addr, server_response, BUFFER_SIZE);
-
-        // Demo code (remove later)
-        printf("server_response: %s", server_response);
+    while(1){
+        // wait for incoming messages from the server
+        int n = udp_socket_read(args->sd, &responder_addr, buffer, BUFFER_SIZE);
+        if(n>0){
+            buffer[n] = '\0'; // null-terminate the message
+            // print server message without overwriting user input
+            printf("\n[Server]: %s\n>", buffer);
+            fflush(stdout);
+        }
     }
+    return NULL;
+}
+
+// sender thread function -> loops to read user input, sends raw string to the server, detects disconn to disconnect
+void* sender_thread(void* arg){
+    thread_args_t* args = (thread_args_t*) arg;
+    char input[BUFFER_SIZE];
+
+    while(1){
+        printf("> "); // show the prompt
+        fflush(stdout);
+
+        // read user input
+        if(fgets(input, BUFFER_SIZE, stdin)!=NULL){
+            // remove newline character
+            input[strcspn(input, "\n")] = '\0';
+
+            // ignore empty input
+            if(strlen(input)==0){
+                continue;
+            }
+
+            // sends the full input string to the server
+            int rc = udp_socket_write(args->sd, &args->server_addr, input, strlen(input)+1);
+            if(rc<0){
+                perror("udp_socket_write failed");
+            }
+
+            // if the user wants to disconnect, exit the client
+            if(strncmp(input, "disconn$", 8)==0){
+                printf("Disconnecting...\n");
+                exit(0);
+            }
+        }
+    }
+    return NULL;
+}
+
+// main function
+int main(){
+    // open UDP socket with dynamic port (let OS assign a free port)
+    int sd = udp_socket_open(0);
+    if(sd<0){
+        perror("Failed to open socket");
+        return -1;
+    }
+
+    // initialise server address (local host, port 12000) - sets IP and port of the chat server
+    struct sockaddr_in server_addr;
+    if(set_socket_addr(&server_addr, "127.0.0.1", SERVER_PORT)<0){
+        perror("Invalid server IP");
+        return -1;
+    }
+
+    // prepare arguments for threads
+    thread_args_t args;
+    args.sd = sd;
+    args.server_addr = server_addr;
+
+    // create listener and sender threads
+    pthread_t listener_tid, sender_tid;
+    if(pthread_create(&listener_tid, NULL, listener_thread, &args)!=0){
+        perror("Failed to create listener thread");
+        return -1;
+    }
+
+    if(pthread_create(&sender_tid, NULL, sender_thread, &args)!=0){
+        perror("Failed to create sender thread");
+        return -1;
+    }
+
+    // wait for the threads to finish (they run indefinitely)
+    pthread_join(listener_tid, NULL);
+    pthread_join(sender_tid, NULL);
+
+    // clock socket (rarely reached)
+    close(sd);
 
     return 0;
 }
