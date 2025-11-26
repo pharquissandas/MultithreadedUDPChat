@@ -27,6 +27,10 @@ client_node_t* client_list_head = NULL;
 // reader-writer lock for the client list --> allows only one thread to write at a time
 pthread_rwlock_t client_list_lock = PTHREAD_RWLOCK_INITIALIZER;
 
+char history[15][BUFFER_SIZE]; // for storing last 15 messages
+int history_count = 0;
+int history_start = 0; // index of the oldest message
+
 // utility: adding client --> locks the list for writing, creates new node 
 // inserts it at head and unlocks list
 void add_client(struct sockaddr_in addr, const char* name){
@@ -176,6 +180,18 @@ void unmute_client(client_node_t* requester, const char* name){
     pthread_rwlock_unlock(&client_list_lock);
 }
 
+// add to history
+void store_in_history(const char* msg){
+    if (history_count < 15){
+        strncpy(history[history_count], msg, BUFFER_SIZE);
+        history_count++;
+    }
+    else {
+        strncpy(history[history_start], msg, BUFFER_SIZE); // replace oldest message
+        history_start = (history_start + 1) % 15; // increment circular buffer
+    }
+}
+
 // handle a single request --> parses request string, splits string into command and message/target name
 // each request has its own detached thread, handles client request independently
 void* handle_request(void* arg){
@@ -208,6 +224,16 @@ void* handle_request(void* arg){
         char join_msg[BUFFER_SIZE];
         snprintf(join_msg, BUFFER_SIZE, "%s has joined the chat", req_content);
         broadcast_message(temp_sd, join_msg, &client_addr);
+        // send last 15 messages from history
+        pthread_rwlock_rdlock(&client_list_lock);
+        for(int i = history_start; i < (history_count + history_start); i++){
+            udp_socket_write(temp_sd, &client_addr, history[i%15], strlen(history[i%15])+1);
+        }
+        pthread_rwlock_unlock(&client_list_lock);
+        // add join message to history
+        pthread_rwlock_wrlock(&client_list_lock);
+        store_in_history(join_msg);
+        pthread_rwlock_unlock(&client_list_lock);
     }
     else if (strcmp(req_type, "disconn") == 0){ // disconnect request
         if (client) {
@@ -225,9 +251,12 @@ void* handle_request(void* arg){
             broadcast_message(temp_sd, msg, &client_addr);
         }
         else{
-            snprintf(msg, BUFFER_SIZE, "%s: %s", "Someone", req_content);
+            snprintf(msg, BUFFER_SIZE, "%s: %s", "Unknown", req_content);
             broadcast_message(temp_sd, msg, &client_addr);
         }
+        pthread_rwlock_wrlock(&client_list_lock);
+        store_in_history(msg);
+        pthread_rwlock_unlock(&client_list_lock);
     }
     else if(strcmp(req_type, "mute") == 0){ // mute client request
         if(client){
@@ -294,6 +323,10 @@ void* handle_request(void* arg){
                 char broadcast_kick_msg[BUFFER_SIZE];
                 snprintf(broadcast_kick_msg, BUFFER_SIZE, "%s Has been removed from the chat", req_content);
                 broadcast_message(temp_sd, broadcast_kick_msg, NULL);
+
+                pthread_rwlock_wrlock(&client_list_lock);
+                store_in_history(broadcast_kick_msg);
+                pthread_rwlock_unlock(&client_list_lock);
             }
         }
         else { // not admin
