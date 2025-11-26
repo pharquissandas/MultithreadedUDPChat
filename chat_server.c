@@ -1,3 +1,4 @@
+#define _XOPEN_SOURCE 700
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,7 +51,7 @@ void remove_client(struct sockaddr_in addr){
     client_node_t* curr = client_list_head;
 
     while(curr){
-        if(curr->addr.sin_port==addr.sin_port & curr->addr.sin_addr.s_addr==addr.sin_addr.s_addr){
+        if(curr->addr.sin_port==addr.sin_port && curr->addr.sin_addr.s_addr==addr.sin_addr.s_addr){
             if(prev){
                 prev->next = curr->next;
             }
@@ -74,6 +75,22 @@ client_node_t* find_client_by_name(const char* name){
     client_node_t* curr = client_list_head;
     while(curr){
         if(strcmp(curr->name,name)==0){
+            pthread_rwlock_unlock(&client_list_lock);
+            return curr;
+        }
+        curr = curr->next;
+    }
+
+    pthread_rwlock_unlock(&client_list_lock);
+    return NULL;
+}
+
+client_node_t* find_client_by_addr(struct sockaddr_in addr){
+    pthread_rwlock_rdlock(&client_list_lock);
+
+    client_node_t* curr = client_list_head;
+    while(curr){
+        if(curr->addr.sin_port == addr.sin_port && curr->addr.sin_addr.s_addr == addr.sin_addr.s_addr){
             pthread_rwlock_unlock(&client_list_lock);
             return curr;
         }
@@ -165,7 +182,9 @@ void* handle_request(void* arg){
     struct sockaddr_in client_addr;
     char* request = ((char**)arg)[0];
     memcpy(&client_addr, ((char**)arg)[1], sizeof(struct sockaddr_in));
-    free(arg); // free the allocated array
+        
+    int temp_sd = udp_socket_open(0); // open temporary socket for response
+    free(arg);
 
     char response[BUFFER_SIZE];
 
@@ -179,20 +198,113 @@ void* handle_request(void* arg){
     char* req_type = request;
     char* req_content = dollar + 1;
 
-    if(strcmp(req_type, "conn")==0){
+    client_node_t* client = find_client_by_addr(client_addr);
+
+    if(strcmp(req_type, "conn") == 0){ // connection request
         add_client(client_addr, req_content);
         snprintf(response, BUFFER_SIZE, "Hi %s, you have successfully connected to the chat", req_content);
-        udp_socket_write(udp_socket_open(0), &client_addr, response, strlen(response)+1);
+        udp_socket_write(temp_sd, &client_addr, response, strlen(response)+1);
+        // broadcast join message
+        char join_msg[BUFFER_SIZE];
+        snprintf(join_msg, BUFFER_SIZE, "%s has joined the chat", req_content);
+        broadcast_message(temp_sd, join_msg, &client_addr);
     }
-    else if(strcmp(req_type, "say")==0){
-        client_node_t* sender = find_client_by_name("unknown"); // Attention required: map IP to name
+    else if (strcmp(req_type, "disconn") == 0){ // disconnect request
+        if (client) {
+            // broadcast leave message
+            char leave_msg[BUFFER_SIZE];
+            snprintf(leave_msg, BUFFER_SIZE, "%s has disconnected", client->name);
+            broadcast_message(temp_sd, leave_msg, &client_addr);
+            remove_client(client_addr);
+        }
+    }
+    else if(strcmp(req_type, "say") == 0){ // broadcast message request
         char msg[BUFFER_SIZE];
-        snprintf(msg, BUFFER_SIZE, "%s: %s", sender ? sender->name : "Someone", req_content);
-        broadcast_message(udp_socket_open(0), msg, &client_addr);
+        if (client) {
+            snprintf(msg, BUFFER_SIZE, "%s: %s", client->name, req_content);
+            broadcast_message(temp_sd, msg, &client_addr);
+        }
+        else{
+            snprintf(msg, BUFFER_SIZE, "%s: %s", "Someone", req_content);
+            broadcast_message(temp_sd, msg, &client_addr);
+        }
     }
-    // Attention required: implement sayto$, disconn$, mute$, unmute$, rename$, kick$
+    else if(strcmp(req_type, "mute") == 0){ // mute client request
+        if(client){
+            mute_client(client, req_content);
+        }
+    }
+    else if(strcmp(req_type, "unmute") == 0){ // unmute client request
+        if(client){
+            unmute_client(client, req_content);
+        }
+    }
+    else if (strcmp(req_type, "sayto") == 0){ // private message request
+        char* space = strchr(req_content, ' ');
+        if (space && client) {
+            *space = '\0';
+            char* target_name = req_content;
+            char* private_msg = space + 1;
+
+            client_node_t* target_client = find_client_by_name(target_name);
+            if (target_client) {
+                char receive_msg[BUFFER_SIZE];
+                char send_msg[BUFFER_SIZE];
+                snprintf(send_msg, BUFFER_SIZE, "[To %s]: %s", target_client->name, private_msg);
+                udp_socket_write(temp_sd, &client_addr, send_msg, strlen(send_msg)+1);
+                snprintf(receive_msg, BUFFER_SIZE, "[From %s]: %s", client->name, private_msg);
+                udp_socket_write(temp_sd, &target_client->addr, receive_msg, strlen(receive_msg)+1);
+            }
+            else { // target client not found
+                char error_msg[BUFFER_SIZE];
+                snprintf(error_msg, BUFFER_SIZE, "User %s not found", target_name);
+                udp_socket_write(temp_sd, &client_addr, error_msg, strlen(error_msg)+1);
+            }
+        }
+    }
+    else if (strcmp(req_type, "rename") == 0) { // rename client request
+        // same as find_client_by_addr but with write lock to modify name
+        pthread_rwlock_wrlock(&client_list_lock);
+        client_node_t* curr = client_list_head;
+        int found = 0;
+        while(curr){
+            if(curr->addr.sin_port == client_addr.sin_port && curr->addr.sin_addr.s_addr == client_addr.sin_addr.s_addr){
+                strncpy(curr->name, req_content, MAX_NAME_LEN);
+                found = 1;
+                break;
+            }
+            curr = curr->next;
+        }
+        pthread_rwlock_unlock(&client_list_lock);
+
+        if(found){
+            snprintf(response, BUFFER_SIZE, "You are now known as %s", req_content);
+            udp_socket_write(temp_sd, &client_addr, response, strlen(response)+1);
+        }
+    }
+    else if (strcmp(req_type, "kick") == 0) { // kick client request (admin only)
+        if (client_addr.sin_port == htons(ADMIN_PORT)) {
+            client_node_t* target_client = find_client_by_name(req_content);
+            if (target_client) {
+                char kick_msg[BUFFER_SIZE];
+                snprintf(kick_msg, BUFFER_SIZE, "You have been removed from the chat by an admin");
+                udp_socket_write(temp_sd, &target_client->addr, kick_msg, strlen(kick_msg)+1);
+                remove_client(target_client->addr);
+                // broadcast kick message to all
+                char broadcast_kick_msg[BUFFER_SIZE];
+                snprintf(broadcast_kick_msg, BUFFER_SIZE, "%s Has been removed from the chat", req_content);
+                broadcast_message(temp_sd, broadcast_kick_msg, NULL);
+            }
+        }
+        else { // not admin
+            char error_msg[BUFFER_SIZE];
+            snprintf(error_msg, BUFFER_SIZE, "You do not have permission to perform this action");
+            udp_socket_write(temp_sd, &client_addr, error_msg, strlen(error_msg)+1);
+        }
+    }
 
     free(request);
+    close(temp_sd); // close socket
     return NULL;
 }
 
