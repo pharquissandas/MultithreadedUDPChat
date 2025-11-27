@@ -6,11 +6,8 @@
 #include <unistd.h>
 #include "udp.h"
 
-#define SERVER_PORT 12000
-#define BUFFER_SIZE 1024
 #define MAX_NAME_LEN 50
 #define MAX_MUTED 50
-#define ADMIN_PORT 6666
 
 // client linked list node
 typedef struct client_node{
@@ -31,18 +28,23 @@ char history[15][BUFFER_SIZE]; // for storing last 15 messages
 int history_count = 0;
 int history_start = 0; // index of the oldest message
 
+// Forward declarations 
+void store_in_history(const char* msg);
+void remove_client(struct sockaddr_in addr);
+client_node_t* find_client_by_name(const char* name);
+client_node_t* find_client_by_addr(struct sockaddr_in addr);
+
 // utility: adding client --> locks the list for writing, creates new node 
 // inserts it at head and unlocks list
 void add_client(struct sockaddr_in addr, const char* name){
     pthread_rwlock_wrlock(&client_list_lock);
-
     client_node_t* new_client = malloc(sizeof(client_node_t));
     new_client->addr = addr;
-    strncpy(new_client->name, name, MAX_NAME_LEN);
+    strncpy(new_client->name, name, MAX_NAME_LEN-1);
+    new_client->name[MAX_NAME_LEN - 1] = '\0';
     new_client->muted_count = 0;
     new_client->next = client_list_head;
     client_list_head = new_client;
-
     pthread_rwlock_unlock(&client_list_lock);
 }
 
@@ -89,9 +91,9 @@ client_node_t* find_client_by_name(const char* name){
     return NULL;
 }
 
+// finding the client by address
 client_node_t* find_client_by_addr(struct sockaddr_in addr){
     pthread_rwlock_rdlock(&client_list_lock);
-
     client_node_t* curr = client_list_head;
     while(curr){
         if(curr->addr.sin_port == addr.sin_port && curr->addr.sin_addr.s_addr == addr.sin_addr.s_addr){
@@ -100,53 +102,51 @@ client_node_t* find_client_by_addr(struct sockaddr_in addr){
         }
         curr = curr->next;
     }
-
     pthread_rwlock_unlock(&client_list_lock);
     return NULL;
 }
 
-// broadcast message to all clients (except muted) --> loops through all clients
-// skips sender so they receives their own message, checks if sender is muted by client, if yes, skip sending to that client
-// uses read lock 
+// broadcast message to all clients (except muted)
 void broadcast_message(int sd, const char* msg, struct sockaddr_in* sender_addr) {
     pthread_rwlock_rdlock(&client_list_lock);
+    
+    client_node_t* sender_node = NULL;
+    if(sender_addr){
+        client_node_t* temp = client_list_head;
+        while(temp) {
+            if(temp->addr.sin_port == sender_addr->sin_port && temp->addr.sin_addr.s_addr == sender_addr->sin_addr.s_addr){
+                sender_node = temp;
+                break;
+            }
+            temp = temp->next;
+        }
+    }
+
     client_node_t* curr = client_list_head;
     while(curr){
-        // skip sender
+        // Skip sender (client's listener handles local echo)
         if(sender_addr && curr->addr.sin_port == sender_addr->sin_port && curr->addr.sin_addr.s_addr == sender_addr->sin_addr.s_addr){
             curr = curr->next;
             continue;
         }
 
-        // skip if sender is muted by this client
-        if(sender_addr){
-            client_node_t* sender = client_list_head;
-            while(sender){
-                if(sender->addr.sin_port == sender_addr->sin_port && sender->addr.sin_addr.s_addr == sender_addr->sin_addr.s_addr){
+        // Skip if sender is muted by this client
+        if(sender_node){
+            int muted = 0;
+            for(int i=0;i<curr->muted_count;i++){
+                if(strcmp(curr->muted_clients[i], sender_node->name)==0){
+                    muted = 1;
                     break;
-                }                    
-                sender = sender->next;
+                }
             }
-
-            if(sender){
-                int muted = 0;
-                for(int i=0;i<curr->muted_count;i++){
-                    if(strcmp(curr->muted_clients[i],sender->name)==0){
-                        muted = 1;
-                        break;
-                    }
-                }
-                if(muted){
-                    curr = curr->next;
-                    continue;
-                }
+            if(muted){
+                curr = curr->next;
+                continue;
             }
         }
-
         udp_socket_write(sd, &curr->addr, (char*)msg, strlen(msg)+1);
         curr = curr->next;
     }
-
     pthread_rwlock_unlock(&client_list_lock);
 }
 
@@ -155,7 +155,9 @@ void broadcast_message(int sd, const char* msg, struct sockaddr_in* sender_addr)
 void mute_client(client_node_t* requester, const char* name){
     pthread_rwlock_wrlock(&client_list_lock);
     if(requester->muted_count<MAX_MUTED){
-        strncpy(requester->muted_clients[requester->muted_count++], name, MAX_NAME_LEN);
+        strncpy(requester->muted_clients[requester->muted_count], name, MAX_NAME_LEN - 1);
+        requester->muted_clients[requester->muted_count][MAX_NAME_LEN - 1] = '\0';
+        requester->muted_count++;
     }
     pthread_rwlock_unlock(&client_list_lock);
 }
@@ -173,7 +175,8 @@ void unmute_client(client_node_t* requester, const char* name){
     }
     if(idx!=-1){
         for(int i=idx;i<requester->muted_count-1;i++){
-            strncpy(requester->muted_clients[i], requester->muted_clients[i+1], MAX_NAME_LEN);
+            strncpy(requester->muted_clients[i], requester->muted_clients[i+1], MAX_NAME_LEN - 1);
+            requester->muted_clients[i][MAX_NAME_LEN - 1] = '\0';
         }
         requester->muted_count--;
     }
@@ -182,14 +185,19 @@ void unmute_client(client_node_t* requester, const char* name){
 
 // add to history
 void store_in_history(const char* msg){
-    if (history_count < 15){
-        strncpy(history[history_count], msg, BUFFER_SIZE);
+    pthread_rwlock_wrlock(&client_list_lock);  
+    if(history_count < 15){
+        strncpy(history[history_count], msg, BUFFER_SIZE - 1);
+        history[history_count][BUFFER_SIZE - 1] = '\0';
         history_count++;
     }
-    else {
-        strncpy(history[history_start], msg, BUFFER_SIZE); // replace oldest message
+    else{
+        strncpy(history[history_start], msg, BUFFER_SIZE - 1); // replace oldest message
+        history[history_start][BUFFER_SIZE - 1] = '\0';
         history_start = (history_start + 1) % 15; // increment circular buffer
     }
+    
+    pthread_rwlock_unlock(&client_list_lock);
 }
 
 // handle a single request --> parses request string, splits string into command and message/target name
@@ -200,6 +208,7 @@ void* handle_request(void* arg){
     memcpy(&client_addr, ((char**)arg)[1], sizeof(struct sockaddr_in));
         
     int temp_sd = udp_socket_open(0); // open temporary socket for response
+    free(((char**)arg)[1]);
     free(arg);
 
     char response[BUFFER_SIZE];
@@ -208,6 +217,7 @@ void* handle_request(void* arg){
     char* dollar = strchr(request, '$');
     if(!dollar){
         free(request);
+        close(temp_sd);
         return NULL;
     }
     *dollar = '\0';
@@ -226,118 +236,112 @@ void* handle_request(void* arg){
         broadcast_message(temp_sd, join_msg, &client_addr);
         // send last 15 messages from history
         pthread_rwlock_rdlock(&client_list_lock);
-        for(int i = history_start; i < (history_count + history_start); i++){
-            udp_socket_write(temp_sd, &client_addr, history[i%15], strlen(history[i%15])+1);
+        for(int i = 0; i < history_count; i++){
+            int idx = (history_start + i) % 15;
+            udp_socket_write(temp_sd, &client_addr, history[idx], strlen(history[idx])+1);
         }
         pthread_rwlock_unlock(&client_list_lock);
         // add join message to history
-        pthread_rwlock_wrlock(&client_list_lock);
         store_in_history(join_msg);
-        pthread_rwlock_unlock(&client_list_lock);
     }
-    else if (strcmp(req_type, "disconn") == 0){ // disconnect request
-        if (client) {
-            // broadcast leave message
+    else if(strcmp(req_type, "disconn") == 0){ // disconnect request
+        if(client){
             char leave_msg[BUFFER_SIZE];
             snprintf(leave_msg, BUFFER_SIZE, "%s has disconnected", client->name);
-            broadcast_message(temp_sd, leave_msg, &client_addr);
+            broadcast_message(temp_sd, leave_msg, NULL);
             remove_client(client_addr);
+            store_in_history(leave_msg);
         }
     }
     else if(strcmp(req_type, "say") == 0){ // broadcast message request
         char msg[BUFFER_SIZE];
-        if (client) {
-            snprintf(msg, BUFFER_SIZE, "%s: %s", client->name, req_content);
-            broadcast_message(temp_sd, msg, &client_addr);
-        }
-        else{
-            snprintf(msg, BUFFER_SIZE, "%s: %s", "Unknown", req_content);
-            broadcast_message(temp_sd, msg, &client_addr);
-        }
-        pthread_rwlock_wrlock(&client_list_lock);
+        char my_msg[BUFFER_SIZE];
+        const char* name = client ? client->name : "Unknown";
+        snprintf(my_msg, BUFFER_SIZE, "[Me]: %s", req_content);
+        udp_socket_write(temp_sd, &client_addr, my_msg, strlen(my_msg)+1);
+        snprintf(msg, BUFFER_SIZE, "%s: %s", name, req_content);
+        broadcast_message(temp_sd, msg, &client_addr);
         store_in_history(msg);
-        pthread_rwlock_unlock(&client_list_lock);
     }
     else if(strcmp(req_type, "mute") == 0){ // mute client request
-        if(client){
+        if(client && find_client_by_name(req_content)){
             mute_client(client, req_content);
+            snprintf(response, BUFFER_SIZE, "You are now muting messages from %s", req_content);
+        } 
+        else{
+            snprintf(response, BUFFER_SIZE, "Error: Client %s not found to mute", req_content);
         }
+        udp_socket_write(temp_sd, &client_addr, response, strlen(response)+1);
     }
     else if(strcmp(req_type, "unmute") == 0){ // unmute client request
         if(client){
             unmute_client(client, req_content);
+            snprintf(response, BUFFER_SIZE, "You are no longer muting messages from %s", req_content);
         }
+        udp_socket_write(temp_sd, &client_addr, response, strlen(response)+1);
     }
-    else if (strcmp(req_type, "sayto") == 0){ // private message request
+    else if(strcmp(req_type, "sayto") == 0){ // private message request
         char* space = strchr(req_content, ' ');
-        if (space && client) {
+        if(space && client){
             *space = '\0';
             char* target_name = req_content;
             char* private_msg = space + 1;
 
             client_node_t* target_client = find_client_by_name(target_name);
-            if (target_client) {
-                char receive_msg[BUFFER_SIZE];
+            if(target_client){
                 char send_msg[BUFFER_SIZE];
+                char receive_msg[BUFFER_SIZE];
                 snprintf(send_msg, BUFFER_SIZE, "[To %s]: %s", target_client->name, private_msg);
                 udp_socket_write(temp_sd, &client_addr, send_msg, strlen(send_msg)+1);
                 snprintf(receive_msg, BUFFER_SIZE, "[From %s]: %s", client->name, private_msg);
                 udp_socket_write(temp_sd, &target_client->addr, receive_msg, strlen(receive_msg)+1);
             }
-            else { // target client not found
-                char error_msg[BUFFER_SIZE];
-                snprintf(error_msg, BUFFER_SIZE, "User %s not found", target_name);
-                udp_socket_write(temp_sd, &client_addr, error_msg, strlen(error_msg)+1);
+            else{ 
+                snprintf(response, BUFFER_SIZE, "User %s not found", target_name);
+                udp_socket_write(temp_sd, &client_addr, response, strlen(response)+1);
             }
         }
     }
-    else if (strcmp(req_type, "rename") == 0) { // rename client request
-        // same as find_client_by_addr but with write lock to modify name
-        pthread_rwlock_wrlock(&client_list_lock);
-        client_node_t* curr = client_list_head;
-        int found = 0;
-        while(curr){
-            if(curr->addr.sin_port == client_addr.sin_port && curr->addr.sin_addr.s_addr == client_addr.sin_addr.s_addr){
-                strncpy(curr->name, req_content, MAX_NAME_LEN);
-                found = 1;
-                break;
+    else if(strcmp(req_type, "rename") == 0){ // rename client request
+        if(client){
+            if (find_client_by_name(req_content)){
+                snprintf(response, BUFFER_SIZE, "Error: Name %s is already taken.", req_content);
+            } else{
+                pthread_rwlock_wrlock(&client_list_lock);
+                strncpy(client->name, req_content, MAX_NAME_LEN - 1);
+                client->name[MAX_NAME_LEN - 1] = '\0';
+                pthread_rwlock_unlock(&client_list_lock);
+                snprintf(response, BUFFER_SIZE, "You are now known as %s", req_content);
             }
-            curr = curr->next;
-        }
-        pthread_rwlock_unlock(&client_list_lock);
-
-        if(found){
-            snprintf(response, BUFFER_SIZE, "You are now known as %s", req_content);
             udp_socket_write(temp_sd, &client_addr, response, strlen(response)+1);
         }
     }
-    else if (strcmp(req_type, "kick") == 0) { // kick client request (admin only)
-        if (client_addr.sin_port == htons(ADMIN_PORT)) {
+    else if(strcmp(req_type, "kick") == 0){ // kick client request (admin only)
+        if(ntohs(client_addr.sin_port) == ADMIN_PORT){
             client_node_t* target_client = find_client_by_name(req_content);
-            if (target_client) {
+            if(target_client){
                 char kick_msg[BUFFER_SIZE];
                 snprintf(kick_msg, BUFFER_SIZE, "You have been removed from the chat by an admin");
                 udp_socket_write(temp_sd, &target_client->addr, kick_msg, strlen(kick_msg)+1);
                 remove_client(target_client->addr);
-                // broadcast kick message to all
                 char broadcast_kick_msg[BUFFER_SIZE];
-                snprintf(broadcast_kick_msg, BUFFER_SIZE, "%s Has been removed from the chat", req_content);
+                snprintf(broadcast_kick_msg, BUFFER_SIZE, "%s has been removed from the chat", req_content);
                 broadcast_message(temp_sd, broadcast_kick_msg, NULL);
-
-                pthread_rwlock_wrlock(&client_list_lock);
                 store_in_history(broadcast_kick_msg);
-                pthread_rwlock_unlock(&client_list_lock);
+            } 
+            else{
+                snprintf(response, BUFFER_SIZE, "Error: Client %s not found to kick", req_content);
+                udp_socket_write(temp_sd, &client_addr, response, strlen(response)+1);
             }
         }
-        else { // not admin
-            char error_msg[BUFFER_SIZE];
-            snprintf(error_msg, BUFFER_SIZE, "You do not have permission to perform this action");
-            udp_socket_write(temp_sd, &client_addr, error_msg, strlen(error_msg)+1);
+        else{ 
+            snprintf(response, BUFFER_SIZE, "You do not have permission to perform this action");
+            udp_socket_write(temp_sd, &client_addr, response, strlen(response)+1);
         }
     }
 
     free(request);
-    close(temp_sd); // close socket
+    close(temp_sd);
     return NULL;
 }
 
@@ -354,7 +358,6 @@ void* listener_thread(void* arg){
         if(n>0){
             buffer[n] = '\0';
 
-            // Prepare arguments for request thread
             void** args = malloc(2*sizeof(void*));
             args[0] = strdup(buffer);               // message
             args[1] = malloc(sizeof(struct sockaddr_in));
@@ -370,10 +373,9 @@ void* listener_thread(void* arg){
 
 // main function --> opens UDP socket on port 12000, starts listener thread, waits for listener thread indefinitely
 // closes socket when server shuts down
-int main() {
+int main(){
     int sd = udp_socket_open(SERVER_PORT);
-    if (sd < 0) {
-        perror("Failed to open server socket");
+    if(sd < 0){
         return -1;
     }
 
