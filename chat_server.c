@@ -231,19 +231,30 @@ void ping_clients(int sd){
 
     while(curr){
         double diff = difftime(now, curr->last_active_time);
-        if(diff > 300 && curr->ping == 0){ // 5 minutes timeout
+        if(diff > 15 && curr->ping == 0){ // 5 minutes timeout
             char ping_msg[] = "PING - please type anything to stay connected";
             udp_socket_write(sd, &curr->addr, ping_msg, strlen(ping_msg)+1);
             curr->ping = 1; // mark ping sent
 
-        }else if(diff > 310 && curr->ping == 1){ // 10 seconds after ping sent, no response
+        }else if(diff > 20 && curr->ping == 1){ // 10 seconds after ping sent, no response
             char kick_msg[BUFFER_SIZE];
             snprintf(kick_msg, BUFFER_SIZE, "You have been removed from the chat for innactivity");
             udp_socket_write(sd, &curr->addr, kick_msg, strlen(kick_msg)+1);
             
             char broadcast_msg[BUFFER_SIZE]; // broadcast to all manually as lock is already held
             snprintf(broadcast_msg, BUFFER_SIZE, "[Server]: %s has been removed for inactivity", curr->name);
-            store_in_history(broadcast_msg);
+            
+            // add to history manually as lock is already held
+            if(history_count < 15){
+                strncpy(history[history_count], broadcast_msg, BUFFER_SIZE - 1);
+                history[history_count][BUFFER_SIZE - 1] = '\0';
+                history_count++;
+            }
+            else{
+                strncpy(history[history_start], broadcast_msg, BUFFER_SIZE - 1); // replace oldest message
+                history[history_start][BUFFER_SIZE - 1] = '\0';
+                history_start = (history_start + 1) % 15; // increment circular buffer
+            }
 
             client_node_t* client = client_list_head;
             while(client){
@@ -340,15 +351,24 @@ void* handle_request(void* arg){
         }
     }
     else if(strcmp(req_type, "say") == 0){ // broadcast message request
-        char msg[BUFFER_SIZE];
-        char my_msg[BUFFER_SIZE];
-        const char* name = client ? client->name : "Unknown";
-        snprintf(my_msg, BUFFER_SIZE, "[Me]: %s", req_content);
-        udp_socket_write(sd, &client_addr, my_msg, strlen(my_msg)+1);
-        snprintf(msg, BUFFER_SIZE, "%s: %s", name, req_content);
-        broadcast_message(sd, msg, &client_addr);
-        store_in_history(msg);
-        update_last_active(client_addr);
+        if (client) {
+            // display sent form user
+            char my_msg[BUFFER_SIZE];
+            snprintf(my_msg, BUFFER_SIZE, "[Me]: %s", req_content);
+            udp_socket_write(sd, &client_addr, my_msg, strlen(my_msg)+1);
+            // broadcast to everyone else
+            char msg[BUFFER_SIZE];
+            snprintf(msg, BUFFER_SIZE, "%s: %s", client->name, req_content);
+            broadcast_message(sd, msg, &client_addr);
+            // store in history
+            store_in_history(msg);
+            update_last_active(client_addr);
+        }
+        else{
+            // If they are not connected, send an error and dont broadcast
+            snprintf(response, BUFFER_SIZE, "Error: You must connect first (type: conn$<name>)");
+            udp_socket_write(sd, &client_addr, response, strlen(response)+1);
+        }
     }
     else if(strcmp(req_type, "mute") == 0){ // mute client request
         if(client && find_client_by_name(req_content)){
