@@ -321,25 +321,30 @@ void* handle_request(void* arg){
     client_node_t* client = find_client_by_addr(client_addr);
 
     if(strcmp(req_type, "conn") == 0){ // connection request
-        add_client(client_addr, req_content);
-        // broadcast join message
-        char join_msg[BUFFER_SIZE];
-        snprintf(join_msg, BUFFER_SIZE, "%s has joined the chat", req_content);
-        broadcast_message(sd, join_msg, &client_addr);
+        if (find_client_by_name(req_content)){
+            snprintf(response, BUFFER_SIZE, "Error: Name %s is already taken.", req_content);
+            udp_socket_write(sd, &client_addr, response, strlen(response)+1);
+        } else{
+            add_client(client_addr, req_content);
+            // broadcast join message
+            char join_msg[BUFFER_SIZE];
+            snprintf(join_msg, BUFFER_SIZE, "%s has joined the chat", req_content);
+            broadcast_message(sd, join_msg, &client_addr);
 
-        // send last 15 messages from history
-        pthread_rwlock_rdlock(&client_list_lock);
-        for(int i = 0; i < history_count; i++){
-            int idx = (history_start + i) % 15;
-            udp_socket_write(sd, &client_addr, history[idx], strlen(history[idx])+1);
+            // send last 15 messages from history
+            pthread_rwlock_rdlock(&client_list_lock);
+            for(int i = 0; i < history_count; i++){
+                int idx = (history_start + i) % 15;
+                udp_socket_write(sd, &client_addr, history[idx], strlen(history[idx])+1);
+            }
+            snprintf(response, BUFFER_SIZE, "Hi %s, you have successfully connected to the chat", req_content);
+            udp_socket_write(sd, &client_addr, response, strlen(response)+1);
+
+            pthread_rwlock_unlock(&client_list_lock);
+            // add join message to history
+            store_in_history(join_msg);
+            update_last_active(client_addr);
         }
-        snprintf(response, BUFFER_SIZE, "Hi %s, you have successfully connected to the chat", req_content);
-        udp_socket_write(sd, &client_addr, response, strlen(response)+1);
-
-        pthread_rwlock_unlock(&client_list_lock);
-        // add join message to history
-        store_in_history(join_msg);
-        update_last_active(client_addr);
     }
     else if(strcmp(req_type, "disconn") == 0){ // disconnect request
         if(client){
