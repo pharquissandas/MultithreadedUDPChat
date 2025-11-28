@@ -231,12 +231,12 @@ void ping_clients(int sd){
 
     while(curr){
         double diff = difftime(now, curr->last_active_time);
-        if(diff > 15 && curr->ping == 0){ // 5 minutes timeout
+        if(diff > 300 && curr->ping == 0){ // 5 minutes timeout
             char ping_msg[] = "PING - please type anything to stay connected";
             udp_socket_write(sd, &curr->addr, ping_msg, strlen(ping_msg)+1);
             curr->ping = 1; // mark ping sent
 
-        }else if(diff > 20 && curr->ping == 1){ // 10 seconds after ping sent, no response
+        }else if(diff > 310 && curr->ping == 1){ // 10 seconds after ping sent, no response
             char kick_msg[BUFFER_SIZE];
             snprintf(kick_msg, BUFFER_SIZE, "You have been removed from the chat for innactivity");
             udp_socket_write(sd, &curr->addr, kick_msg, strlen(kick_msg)+1);
