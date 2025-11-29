@@ -1,73 +1,71 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <pthread.h>
-#include <unistd.h>
-#include <ncurses.h> 
-#include "udp.h"
+#include <stdio.h>    // for standard I/O functions
+#include <stdlib.h>   // for standard library functions
+#include <string.h>   // for string manipulation functions
+#include <pthread.h>  // POSIX threading
+#include <unistd.h>   // POSIX API
+#include <ncurses.h>  // for Ncurses UI
+#include "udp.h"      // custom UDP socket functions
 
 // structure to pass multiple arguments to threads
 typedef struct{
-    int sd;
-    struct sockaddr_in server_addr;
+    int sd;                           // socket descriptor
+    struct sockaddr_in server_addr;   // server address
 } thread_args_t;
 
 // global Ncurses Windows and synchronization lock
-WINDOW *chat_win;
-WINDOW *input_win;
-pthread_mutex_t ui_lock = PTHREAD_MUTEX_INITIALIZER; 
+WINDOW *chat_win;                                      // window for displaying chat messages
+WINDOW *input_win;                                     // window for user input
+pthread_mutex_t ui_lock = PTHREAD_MUTEX_INITIALIZER;   // mutex for synchronizing UI access
 
 // Initialize Ncurses and set up the two windows
 void setup_ncurses(){
-    initscr();           
-    cbreak();           
-    // We *must* enable echo here so the user can see their typing.
-    // The previous design was fighting Ncurses's default input handling.
-    echo();            
-    curs_set(1);         
+    initscr();              // Start Ncurses mode
+    cbreak();               // Disable line buffering
+    echo();                 // Enable echoing of typed characters
+    curs_set(1);            // Make cursor visible
     
-    int chat_height = LINES - 3; 
+    int chat_height = LINES - 3;  // height for chat window
     
-    chat_win = newwin(chat_height, COLS, 0, 0); 
-    input_win = newwin(3, COLS, chat_height, 0); 
+    chat_win = newwin(chat_height, COLS, 0, 0);   // chat display window
+    input_win = newwin(3, COLS, chat_height, 0);  // input window
 
-    scrollok(chat_win, TRUE); 
+    scrollok(chat_win, TRUE);           // enable scrolling for chat window
 
-    box(input_win, 0, 0);
-    mvwprintw(input_win, 1, 1, "> "); // Prompt moved slightly left for input space
+    box(input_win, 0, 0);               // box around input window
+    mvwprintw(input_win, 1, 1, "> ");   // prompt in input window
     
-    refresh();
-    wrefresh(chat_win);
-    wrefresh(input_win);
-    wmove(input_win, 1, 3); // Move cursor to the starting position
+    refresh();                          // refresh standard screen
+    wrefresh(chat_win);                 // refresh chat window
+    wrefresh(input_win);                // refresh input window
+    wmove(input_win, 1, 3);             // move cursor to input area
 }
 
 // Restore terminal
 void cleanup_ncurses() {
-    endwin(); 
+    endwin();              // End Ncurses mode
 }
 
 // Utility function to print messages to the chat window safely
 void print_chat_message(const char* msg){
     pthread_mutex_lock(&ui_lock);
     
-    // 1. Save cursor position in the input window
+    // save cursor position in the input window
     int cur_y, cur_x;
     getyx(input_win, cur_y, cur_x);
     
-    // 2. Clear the input line (not the whole window)
+    // clear the input line (not the whole window)
     wmove(input_win, 1, 3);
     wclrtoeol(input_win);
 
-    // 3. Print message to chat window
+    // print message to chat window
     wprintw(chat_win, "%s\n", msg);
     wrefresh(chat_win);
     
-    // 4. Redraw input prompt and box
+    // redraw input prompt and box
     box(input_win, 0, 0);
     mvwprintw(input_win, 1, 1, "> "); 
     
-    // 5. Restore the cursor
+    // restore the cursor
     wmove(input_win, cur_y, cur_x);
     wrefresh(input_win);
     
@@ -162,6 +160,7 @@ int main(){
         return -1;
     }
     
+    // setup Ncurses UI
     setup_ncurses();
     print_chat_message("Client loaded. Type 'conn$<name>' to connect to the server.");
 
@@ -170,13 +169,14 @@ int main(){
     args.sd = sd;
     args.server_addr = server_addr;
 
-    // create listener and sender threads
+    // create listener thread
     pthread_t listener_tid, sender_tid;
     if(pthread_create(&listener_tid, NULL, listener_thread, &args)!=0){
         perror("Failed to create listener thread");
         return -1;
     }
 
+    // create sender thread
     if(pthread_create(&sender_tid, NULL, sender_thread, &args)!=0){
         perror("Failed to create sender thread");
         return -1;

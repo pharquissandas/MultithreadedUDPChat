@@ -1,15 +1,15 @@
-#define _XOPEN_SOURCE 700
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <pthread.h>
-#include <unistd.h>
-#include "udp.h"
+#define _XOPEN_SOURCE 700    // for pthread_rwlock
+#include <stdio.h>           // for printf
+#include <stdlib.h>          // for malloc, free
+#include <string.h>          // for strlen, strcpy, strcmp
+#include <pthread.h>         // for pthreads
+#include <unistd.h>          // for close, sleep
+#include "udp.h"             // for UDP socket functions
 
-#define MAX_NAME_LEN 50
-#define MAX_MUTED 50
+#define MAX_NAME_LEN 50      // maximum length of client name
+#define MAX_MUTED 50         // maximum number of muted clients per client
 
-// client linked list node
+// client linked list node structure
 typedef struct client_node{
     struct sockaddr_in addr; // client IP and port
     char name[MAX_NAME_LEN]; // client chat name
@@ -30,14 +30,13 @@ char history[15][BUFFER_SIZE]; // for storing last 15 messages
 int history_count = 0;
 int history_start = 0; // index of the oldest message
 
-// Forward declarations 
+// function declarations
 void store_in_history(const char* msg);
 void remove_client(struct sockaddr_in addr);
 client_node_t* find_client_by_name(const char* name);
 client_node_t* find_client_by_addr(struct sockaddr_in addr);
 
-// utility: adding client --> locks the list for writing, creates new node 
-// inserts it at head and unlocks list
+// utility: add a new client --> locks list for writing, creates new node and adds to head of list, unlocks
 void add_client(struct sockaddr_in addr, const char* name){
     pthread_rwlock_wrlock(&client_list_lock);
     client_node_t* new_client = malloc(sizeof(client_node_t));
@@ -52,8 +51,7 @@ void add_client(struct sockaddr_in addr, const char* name){
     pthread_rwlock_unlock(&client_list_lock);
 }
 
-// utility: remove a client --> locks list for writing, searches for client using IP and port
-// removes the node from the list and frees memory, and unlocks
+// utility: remove a client --> locks list for writing, searches for client by address, removes node, unlocks
 void remove_client(struct sockaddr_in addr){
     pthread_rwlock_wrlock(&client_list_lock);
 
@@ -77,8 +75,7 @@ void remove_client(struct sockaddr_in addr){
     pthread_rwlock_unlock(&client_list_lock);
 }
 
-// finding the client by name --> searches client by name, uses read lock
-// returns pointer to client or NULL
+// finding the client by name
 client_node_t* find_client_by_name(const char* name){
     pthread_rwlock_rdlock(&client_list_lock);
 
@@ -90,7 +87,6 @@ client_node_t* find_client_by_name(const char* name){
         }
         curr = curr->next;
     }
-
     pthread_rwlock_unlock(&client_list_lock);
     return NULL;
 }
@@ -110,14 +106,14 @@ client_node_t* find_client_by_addr(struct sockaddr_in addr){
     return NULL;
 }
 
-// broadcast message to all clients (except muted)
+// broadcast message to all clients except sender and muted clients
 void broadcast_message(int sd, const char* msg, struct sockaddr_in* sender_addr) {
     pthread_rwlock_rdlock(&client_list_lock);
-    
     client_node_t* sender_node = NULL;
     if(sender_addr){
         client_node_t* temp = client_list_head;
-        while(temp) {
+        // find sender node
+        while(temp){
             if(temp->addr.sin_port == sender_addr->sin_port && temp->addr.sin_addr.s_addr == sender_addr->sin_addr.s_addr){
                 sender_node = temp;
                 break;
@@ -128,13 +124,13 @@ void broadcast_message(int sd, const char* msg, struct sockaddr_in* sender_addr)
 
     client_node_t* curr = client_list_head;
     while(curr){
-        // Skip sender (client's listener handles local echo)
+        // Skip sender
         if(sender_addr && curr->addr.sin_port == sender_addr->sin_port && curr->addr.sin_addr.s_addr == sender_addr->sin_addr.s_addr){
             curr = curr->next;
             continue;
         }
 
-        // Skip if sender is muted by this client
+        // Skip if sender is muted by current client
         if(sender_node){
             int muted = 0;
             for(int i=0;i<curr->muted_count;i++){
@@ -154,8 +150,7 @@ void broadcast_message(int sd, const char* msg, struct sockaddr_in* sender_addr)
     pthread_rwlock_unlock(&client_list_lock);
 }
 
-// add client to mute list --> add's clients name to requester's mute list
-// uses write lock
+// add client to mute list --> adds to mute list
 void mute_client(client_node_t* requester, const char* name){
     pthread_rwlock_wrlock(&client_list_lock);
     if(requester->muted_count<MAX_MUTED){
@@ -167,16 +162,17 @@ void mute_client(client_node_t* requester, const char* name){
 }
 
 // remove client from mute list --> removes from mute list
-// uses write lock
 void unmute_client(client_node_t* requester, const char* name){
     pthread_rwlock_wrlock(&client_list_lock);
     int idx = -1;
+    // find index of muted client
     for(int i=0;i<requester->muted_count;i++){
         if(strcmp(requester->muted_clients[i],name)==0){
             idx = i;
             break;
         }
     }
+    // shift remaining muted clients down
     if(idx!=-1){
         for(int i=idx;i<requester->muted_count-1;i++){
             strncpy(requester->muted_clients[i], requester->muted_clients[i+1], MAX_NAME_LEN - 1);
@@ -187,29 +183,29 @@ void unmute_client(client_node_t* requester, const char* name){
     pthread_rwlock_unlock(&client_list_lock);
 }
 
-// add to history
+// store message in history --> keeps last 15 messages in circular buffer
 void store_in_history(const char* msg){
     pthread_rwlock_wrlock(&client_list_lock);  
+    // add message to history
     if(history_count < 15){
         strncpy(history[history_count], msg, BUFFER_SIZE - 1);
         history[history_count][BUFFER_SIZE - 1] = '\0';
         history_count++;
     }
+    // circular buffer overwrite
     else{
         strncpy(history[history_start], msg, BUFFER_SIZE - 1); // replace oldest message
         history[history_start][BUFFER_SIZE - 1] = '\0';
         history_start = (history_start + 1) % 15; // increment circular buffer
     }
-    
     pthread_rwlock_unlock(&client_list_lock);
 }
 
-// update last active time of client
+// update last active time for client
 void update_last_active(struct sockaddr_in addr){
-
     pthread_rwlock_wrlock(&client_list_lock);
     client_node_t* curr = client_list_head;
-    // search for existing client
+    // find client and update time
     while(curr){
         if(curr->addr.sin_port == addr.sin_port && curr->addr.sin_addr.s_addr == addr.sin_addr.s_addr){
             curr->last_active_time = time(NULL);
@@ -222,13 +218,15 @@ void update_last_active(struct sockaddr_in addr){
     pthread_rwlock_unlock(&client_list_lock);
 }
 
+// ping clients for inactivity --> sends ping message if inactive for 5 minutes, removes if no response in 10 seconds
 void ping_clients(int sd){
     time_t now = time(NULL);
     pthread_rwlock_wrlock(&client_list_lock);
 
     client_node_t* curr = client_list_head; // head of last active list
-    client_node_t* prev = NULL;
+    client_node_t* prev = NULL;             // previous node for removal
 
+    // iterate through clients
     while(curr){
         double diff = difftime(now, curr->last_active_time);
         if(diff > 300 && curr->ping == 0){ // 5 minutes timeout
@@ -236,7 +234,8 @@ void ping_clients(int sd){
             udp_socket_write(sd, &curr->addr, ping_msg, strlen(ping_msg)+1);
             curr->ping = 1; // mark ping sent
 
-        }else if(diff > 310 && curr->ping == 1){ // 10 seconds after ping sent, no response
+        }
+        else if(diff > 310 && curr->ping == 1){ // 10 seconds after ping sent, no response
             char kick_msg[BUFFER_SIZE];
             snprintf(kick_msg, BUFFER_SIZE, "You have been removed from the chat for innactivity");
             udp_socket_write(sd, &curr->addr, kick_msg, strlen(kick_msg)+1);
@@ -258,7 +257,7 @@ void ping_clients(int sd){
 
             client_node_t* client = client_list_head;
             while(client){
-                // Don't send to the person we are kicking (we already told them bye)
+                // broadcast to all clients except the one being removed
                 if(client != curr){
                     udp_socket_write(sd, &client->addr, broadcast_msg, strlen(broadcast_msg)+1);
                 }
@@ -277,13 +276,13 @@ void ping_clients(int sd){
             free(temp);
             continue; // continue loop with new curr
         }
-        
         prev = curr;
         curr = curr->next;
     }
     pthread_rwlock_unlock(&client_list_lock);
 }
 
+// ping thread --> loops forever, sleeps for 5 seconds, calls ping_clients
 void* ping_thread(void* arg){
     int sd = *(int*)arg;
     while(1){
@@ -293,9 +292,7 @@ void* ping_thread(void* arg){
     return NULL;
 }
 
-
-// handle a single request --> parses request string, splits string into command and message/target name
-// each request has its own detached thread, handles client request independently
+// handle individual client request --> parses request and performs appropriate action
 void* handle_request(void* arg){
     struct sockaddr_in client_addr;
     char* request = ((char**)arg)[0];
@@ -404,6 +401,7 @@ void* handle_request(void* arg){
             char* target_name = req_content;
             char* private_msg = space + 1;
 
+            // find target client
             client_node_t* target_client = find_client_by_name(target_name);
             if(target_client){
                 char send_msg[BUFFER_SIZE];
@@ -467,14 +465,13 @@ void* handle_request(void* arg){
     return NULL;
 }
 
-// listener thread --> loops forever, reading messages from UDP socket
-// for each message, copies message and client address into heap memory
-// spwans new handle_request thread to process it
+// listener thread --> loops forever, reads incoming messages, spawns handler thread for each request
 void* listener_thread(void* arg){
     int sd = *(int*)arg;
     char buffer[BUFFER_SIZE];
     struct sockaddr_in client_addr;
 
+    // infinite loop to listen for incoming messages
     while(1){
         int n = udp_socket_read(sd, &client_addr, buffer, BUFFER_SIZE);
         if(n>0){
@@ -497,8 +494,7 @@ void* listener_thread(void* arg){
     return NULL;
 }
 
-// main function --> opens UDP socket on port 12000, starts listener thread, waits for listener thread indefinitely
-// closes socket when server shuts down
+// main function --> opens UDP socket, starts listener and ping threads, waits for them to finish
 int main(){
     int sd = udp_socket_open(SERVER_PORT);
     if(sd < 0){
@@ -507,15 +503,19 @@ int main(){
 
     printf("Server listening on port %d...\n", SERVER_PORT);
 
+    // start listener thread
     pthread_t listener_tid;
     pthread_create(&listener_tid, NULL, listener_thread, &sd);
 
+    // start ping thread
     pthread_t ping_tid;
     pthread_create(&ping_tid, NULL, ping_thread, &sd);
 
+    // wait for threads to finish (they won't in this infinite server)
     pthread_join(listener_tid, NULL);
     pthread_join(ping_tid, NULL);
 
+    // close socket
     close(sd);
     return 0;
 }
