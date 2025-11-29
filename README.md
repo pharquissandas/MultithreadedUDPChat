@@ -73,6 +73,7 @@ Each client spawns **two threads**:
 | `rename$ new_name` | Change username | `rename$ Alice123` |
 | `disconn$` | Disconnect from server | `disconn$` |
 | `kick$ name` | Admin removes a user (admin on port 6666) | `kick$ Bob` |
+| `ret-ping$` | Resets last active timer | `ret-ping$` |
 
 ---
 
@@ -99,6 +100,12 @@ Non-blocking I/O is used for the listener thread, providing a clean, professiona
 - Parses request types
 - Spawns the appropriate handler thread
 
+### Ping Thread
+- Pings every 5 seconds
+- Checks if checks if client has been innative for more than 5 minutes
+- If yes then sends a ping message telling the user to be active or be kicked
+- If the client does not respond then they are kicked after 10 more seconds
+
 ### Shared Linked List of Clients
 The server maintains a thread-safe linked list holding:
 
@@ -120,6 +127,7 @@ The server maintains a thread-safe linked list holding:
 | `rename$ new` | Update name in shared list |
 | `disconn$` | Remove client and confirm |
 | `kick$ name` | Admin only; remove and notify |
+| `ret-ping` | Resets last active timer |
 
 Each request is serviced by a **dedicated thread**.
 
@@ -129,16 +137,20 @@ Each request is serviced by a **dedicated thread**.
 
 Since multiple threads access shared structures, the server uses a **reader-writer lock**:
 
-**Reader threads:**
+**Reader functions:**
 - Broadcasting messages
 - Looking up recipients
 - Checking mute lists
+- Connect to server
 
-**Writer threads:**
+**Writer functions:**
 - Adding/removing clients
 - Renaming
 - Updating mute lists
 - Handling kicks
+- Updating last 15 message history
+- Update last active timer
+- Ping clients
 
 **Functions used:**
 `pthread_rwlock_rdlock()`
@@ -151,13 +163,15 @@ Since multiple threads access shared structures, the server uses a **reader-writ
 - Server maintains a circular buffer of the last 15 broadcast messages
 - Protected by its own mutex or reader-writer lock
 - Sent automatically to a client upon `conn$`
+- History is updated with every message and every server message
+- If there are more than 15 messages the oldest one is replaced
 
 ### PE2: Inactive Client Removal
-- Server keeps `(last_active_time, client)` pairs in a thread-safe min-heap
-- Monitoring thread:
-  - Checks oldest entry
-  - Sends `ping$`
-  - Removes client if `ret-ping$` not received
+- Client node linked list is updated with last active time
+- Ping thread:
+  - Checks if the last active time of the client is over 5 minutes
+  - If yes, sends `ping$` message : "PING - please type anything to stay connected"
+  - Removes client if timer is not reset by any message or `ret-ping$` not received within 10 seconds
 - Ensures inactive users do not stay connected indefinitely
 
 ---
@@ -175,6 +189,10 @@ Place the following files in your working directory:
 ```bash
 gcc chat_server.c udp.c -o server -pthread
 gcc chat_client.c udp.c -o client -pthread -l ncurses
+```
+**Run**
+```bash
 ./server
 ./client
+```
 
