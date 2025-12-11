@@ -98,19 +98,18 @@ Non-blocking I/O is used for the listener thread, providing a clean, professiona
 ### Listener Thread
 - Dedicated thread continuously reads UDP packets from any client
 - Parses request types
-- Spawns the appropriate handler thread
+- Spawns a detached handler thread for every request to ensure concurrency.
 
 ### Ping Thread
-- Pings every 5 seconds
-- Checks if checks if client has been innative for more than 5 minutes
-- If yes then sends a ping message telling the user to be active or be kicked
-- If the client does not respond then they are kicked after 10 more seconds
+- Runs in the background, waking up every 5 seconds.
+- Checks if any client has been inactive for more than 5 minutes.
+- If inactive: sends a `ping$` message telling the user to be active or be kicked.
+- If the client does not respond with `ret-ping$` (or any other message) within 10 seconds, they are kicked.
 
 ### Shared Linked List of Clients
 The server maintains a thread-safe linked list holding:
 
-- Client IP
-- Port number
+- Client IP & Port number
 - Chat name
 - Mute list
 - Activity timestamp (PE2)
@@ -135,27 +134,28 @@ Each request is serviced by a **dedicated thread**.
 
 ## 6. Synchronization
 
-Since multiple threads access shared structures, the server uses a **reader-writer lock**:
+Since multiple threads access shared structures (the client list and history buffer), the server uses a **reader-writer lock** (`pthread_rwlock_t`):
 
-**Reader functions:**
-- Broadcasting messages
-- Looking up recipients
-- Checking mute lists
-- Connect to server
+**Reader functions (Shared Access):**
+- Looking up recipients (`sayto`)
+- Checking mute lists during broadcast
+- Reading history to send to new users
 
-**Writer functions:**
-- Adding/removing clients
-- Renaming
+**Writer functions (Exclusive Access):**
+- Connecting (`conn$`) or Disconnecting (`disconn$`)
+- Renaming users
 - Updating mute lists
 - Handling kicks
-- Updating last 15 message history
-- Update last active timer
-- Ping clients
+- Updating the last 15-message circular buffer history
+- Update last active timestamps
+- Removing inactive clients (Ping thread)
 
 **Functions used:**
 `pthread_rwlock_rdlock()`
 `pthread_rwlock_wrlock()`
 `pthread_rwlock_unlock()`
+
+---
 
 ## 7. Proposed Extensions
 
@@ -176,7 +176,21 @@ Since multiple threads access shared structures, the server uses a **reader-writ
 
 ---
 
-## 8. Build Instructions
+## 8. Additional Features (Robustness & Error Handling)
+Beyond the core assignment requirements, the application includes several validation checks to ensure stability and a better user experience:
+
+* **Unique Username Enforcement:** The server checks the active client list and prevents new users from connecting (`conn$`) if the requested name is already taken.
+* **Safe Renaming:** Users cannot rename (`rename$`) themselves to a username that currently belongs to another active user.
+* **Target Validation:**
+    * **Private Messages:** `sayto$` checks if the recipient exists before attempting delivery. If not, an error is returned to the sender.
+    * **Muting:** `mute$` and `unmute$` verify that the target user exists before updating the local mute list.
+    * **Kicking:** `kick$` verifies the target exists before attempting removal.
+* **Connection Enforcement:** Clients cannot send broadcast messages (`say$`) until they have successfully established a named connection. Attempting to chat while unconnected prompts the user to connect first.
+* **Admin Security:** The `kick$` command is strictly restricted to the admin client (bound to port 6666). Regular users attempting to kick others receive a "Permission Denied" response.
+
+---
+
+## 9. Build Instructions
 
 Place the following files in your working directory:
 
