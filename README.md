@@ -1,6 +1,9 @@
 # Multithreaded UDP Chat Application
 
-## Software Systems Assignment 2 - Preet Harquissandas and Mikhail Agakov
+## Software Systems Assignment 2
+## Authors
+* Preet Harquissandas (CID: 02589338)
+* Mikhail Agakov (CID: 02560202)
 ---
 
 ## Overview
@@ -13,6 +16,33 @@ It is based on the requirements of the assignment covering:
 - Synchronization of shared data structures
 - Client–server architecture
 - Proposed Extensions (PEs)
+
+## Summary
+
+### Core Requirements
+| Feature | Status | Description |
+| :--- | :--- | :--- |
+| **UDP Communication** | **Fully Implemented** | Uses custom wrappers (`udp.h`) for `sendto`/`recvfrom`. |
+| **Multithreading** | **Fully Implemented** | **Client:** Sender & Listener threads. **Server:** Listener, Ping, & Worker threads. |
+| **Synchronization** | **Fully Implemented** | Server uses `pthread_rwlock` for the client list. Client uses `pthread_mutex` for UI. |
+| **Basic Chat** | **Fully Implemented** | Supports `conn$`, `say$`, and `disconn$` with broadcast. |
+| **Private Messaging** | **Fully Implemented** | Supports `sayto$` for direct one-to-one messaging. |
+| **Moderation** | **Fully Implemented** | Supports `mute$`, `unmute$`, and `kick$` (admin only). |
+| **User Interface** | **Fully Implemented** | Ncurses split-window UI (Input vs. Chat history) with thread safety. |
+
+### Proposed Extensions (PEs)
+| Extension | Status | Description |
+| :--- | :--- | :--- |
+| **PE1: Message History** | **Fully Implemented** | Server maintains a circular buffer of the last 15 messages, sent to new users on join. |
+| **PE2: Inactive Removal** | **Fully Implemented** | Background thread pings users inactive for 5 mins; kicks them if no response in 10s. |
+
+### Extra Features
+| Extension | Status | Description |
+| :--- | :--- | :--- |
+| **Unique Usernames** | **Fully Implemented** | Server rejects `conn$` or `rename$` if the requested name is already taken. |
+| **Connection Enforcement** | **Fully Implemented** | Unconnected clients cannot send messages; they receive an error prompt. |
+| **Target Validation** | **Fully Implemented** | `sayto`, `mute`, and `kick` verify the target exists before executing. |
+| **Admin Security** | **Fully Implemented** | `kick$` command is strictly restricted to the client bound to port 6666. |
 
 ---
 
